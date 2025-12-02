@@ -219,6 +219,10 @@ async def add_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def supplier_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("supplier_step вызван") 
+    if not update.message or not update.message.text:
+        logger.error("Нет текста в сообщении")
+        return SUPPLIER
     try:
         await context.bot.delete_message(
             chat_id=update.effective_chat.id,
@@ -253,6 +257,7 @@ async def supplier_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return PAYER
 
 async def payer_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("payer_step вызван")
     try:
         await context.bot.delete_message(
             chat_id=update.effective_chat.id,
@@ -1524,9 +1529,6 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     application = Application.builder().token("8344348942:AAGTzHRkWE-Yr6uvCf6Mn_Pgj3WCOjigNGI").build()
 
-    # Обработчики команд
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("cancel", cancel_search))
 
     # Основной ConversationHandler — создание И РЕДАКТИРОВАНИЕ доставки
     conv_handler = ConversationHandler(
@@ -1536,7 +1538,7 @@ def main():
             CallbackQueryHandler(select_edit_field, pattern=r"^field:.*"),
         ],
         states={
-            SUPPLIER: [MessageHandler(filters.TEXT & ~filters.COMMAND, supplier_step)],
+            SUPPLIER: [MessageHandler(filters.TEXT, supplier_step)],
             PAYER: [MessageHandler(filters.TEXT & ~filters.COMMAND, payer_step)],
             INVOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_step)],
             PICKUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, pickup_step)],
@@ -1547,9 +1549,14 @@ def main():
             ]
         },
         fallbacks=[CommandHandler("cancel", cancel_search)],
-        per_message=True
+        per_message=False
     )
+
     application.add_handler(conv_handler)
+
+    # Обработчики команд
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("cancel", cancel_search))
 
     # CallbackQueryHandler для меню и действий
     application.add_handler(CallbackQueryHandler(download_table, pattern="^download_table$"))
@@ -1569,12 +1576,6 @@ def main():
     # !!! УБРАТЬ эту строку — она больше не нужна
     # application.add_handler(CallbackQueryHandler(select_edit_field, pattern=r"^field:.*"))
 
-
-    # Обработчик для кнопки с иконкой сетки
-    application.add_handler(MessageHandler(
-        filters.TEXT & filters.Regex("^☰$"),
-        show_main_menu
-    ))
 
     try:
         print("Бот запущен. Ожидание обновлений...")
