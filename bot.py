@@ -1021,22 +1021,17 @@ async def download_table(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    # Удаляем старое меню
     await query.delete_message()
     await delete_excel_message(context, query.message.chat_id)
 
     if 'delivery_messages' in context.user_data:
         for msg_id in context.user_data['delivery_messages']:
             try:
-                await context.bot.delete_message(
-                    chat_id=query.message.chat_id,
-                    message_id=msg_id
-                )
+                await context.bot.delete_message(chat_id=query.message.chat_id, message_id=msg_id)
             except:
                 pass
         context.user_data.pop('delivery_messages', None)
 
-    # Получаем все доставки из БД
     cursor = conn.execute(
         """SELECT id, supplier, payer, invoice_number, pickup_address,
                    delivery_address, cargo_info, author_name, driver_name, status, completed_at
@@ -1053,79 +1048,98 @@ async def download_table(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['delivery_messages'] = [msg.message_id]
         return
 
-    # Создаём Excel-файл
     wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Доставки"
+    status_sheets = {
+        "Черновики": "черновик",
+        "Приняты в работу": "принята в работу",
+        "Доставлено": "доставлено"
+    }
 
-    # Заголовки таблицы (добавили "Водитель")
-    headers = [
-        "ID", "Поставщик", "Плательщик", "Счёт", "Адрес загрузки",
-        "Адрес отгрузки", "Габариты/вес", "Автор", "Водитель", "Статус", "Дата выполнения"
-    ]
-    ws.append(headers)
+    for sheet_name, status_filter in status_sheets.items():
+        ws = wb.create_sheet(title=sheet_name)
+        headers = [
+            "ID", "Поставщик", "Плательщик", "Счёт", "Адрес загрузки",
+            "Адрес отгрузки", "Габариты/вес", "Автор", "Водитель", "Статус", "Дата выполнения"
+        ]
+        ws.append(headers)
 
-    # Заполняем данными
-    for delivery in deliveries:
-        ws.append([
-            delivery[0],  # ID
-            delivery[1],  # Поставщик
-            delivery[2],  # Плательщик
-            delivery[3],  # Счёт
-            delivery[4] or "",  # Адрес загрузки
-            delivery[5] or "",  # Адрес отгрузки
-            delivery[6] or "",  # Габариты/вес
-            delivery[7],  # Автор
-            delivery[8] or "",  # Водитель (было delivery[8], теперь это driver_name)
-            delivery[9],  # Статус
-            delivery[10] or ""  # Дата выполнения (было delivery[9], теперь delivery[10])
-        ])
+        filtered_deliveries = [d for d in deliveries if d[9] == status_filter]
 
-    # 2. Включаем автофильтры для всей таблицы (от шапки до последней строки)
-    ws.auto_filter.ref = f"A1:K{ws.max_row}"  # K — 11-й столбец (было J → теперь K)
+        for delivery in filtered_deliveries:
+            row = [
+                delivery[0], delivery[1], delivery[2], delivery[3],
+                delivery[4] or "", delivery[5] or "", delivery[6] or "",
+                delivery[7], delivery[8] or "", delivery[9], delivery[10] or ""
+            ]
+            ws.append(row)
 
-    # 3. Стилизуем шапку (первая строка)
-    header_row = ws[1]
-    for cell in header_row:
-        # Полужирный шрифт
-        cell.font = openpyxl.styles.Font(bold=True)
-        # Цвет фона (светло-серый)
-        cell.fill = openpyxl.styles.PatternFill(
-            start_color="D9D9D9",
-            end_color="D9D9D9",
-            fill_type="solid"
-        )
-        # Выравнивание по центру
-        cell.alignment = openpyxl.styles.Alignment(
-            horizontal="center",
-            vertical="center"
-        )
-        # Автоширина столбцов по содержимому
-        column_letter = cell.column_letter
-        column_width = max(
-            len(str(cell.value)) + 2,
-            12  # минимальная ширина
-        )
-        ws.column_dimensions[column_letter].width = column_width
+        # Автофильтры
+        ws.auto_filter.ref = f"A1:K{ws.max_row}"
 
-    # 4. Сохраняем файл во временный буфер
+        # Стилизация шапки
+        header_row = ws[1]
+        for cell in header_row:
+            cell.font = openpyxl.styles.Font(bold=True)
+            cell.fill = openpyxl.styles.PatternFill(
+                start_color="D9D9D9",
+                end_color="D9D9D9",
+                fill_type="solid"
+            )
+            cell.alignment = openpyxl.styles.Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True  # Обязательно включаем перенос
+            )
+
+        # Расчёт оптимальной ширины столбцов (максимум 35)
+        column_widths = {}
+        for row in ws.iter_rows(min_row=1, max_row=ws.max_row):
+            for cell in row:
+                if cell.value:
+                    # Разбиваем текст на строки по переносам и ищем максимальную длину
+                    lines = str(cell.value).split('\n')
+                    max_line_length = max(len(line) for line in lines)
+                    column_letter = cell.column_letter
+                    current_width = column_widths.get(column_letter, 0)
+                    # Ограничиваем ширину 35 символами, добавляем 2 на отступы
+                    new_width = min(max_line_length + 2, 35)
+                    column_widths[column_letter] = max(current_width, new_width)
+
+
+        # Применяем рассчитанную ширину
+        for col, width in column_widths.items():
+            ws.column_dimensions[col].width = width
+
+
+        # Гарантированное центрирование и перенос для всех ячеек
+        for row in ws.iter_rows():
+            for cell in row:
+                # Сохраняем горизонтальное выравнивание из шапки или по умолчанию
+                horizontal_align = cell.alignment.horizontal or "left"
+                cell.alignment = openpyxl.styles.Alignment(
+                    horizontal=horizontal_align,
+                    vertical="center",  # Центрируем по вертикали
+                    wrap_text=True  # Принудительно включаем перенос текста
+                )
+
+    # Удаление пустого листа
+    if wb['Sheet'].max_row == 1 and wb['Sheet'].max_column == 1:
+        wb.remove(wb['Sheet'])
+
+    # Отправка файла
     from io import BytesIO
     output = BytesIO()
     wb.save(output)
-    output.seek(0)  # Возвращаем указатель в начало
+    output.seek(0)
 
-    # 5. Отправляем файл пользователю
     sent_message = await context.bot.send_document(
         chat_id=query.message.chat_id,
         document=output,
-        filename="доставки.xlsx",
-        caption="Таблица доставок"
+        filename="доставки_менеджер.xlsx",
+        caption="Таблица доставок (по статусам)"
     )
-
-    # Сохраняем ID сообщения с документом
     context.user_data['excel_message_id'] = sent_message.message_id
 
-    # 6. Отправляем сообщение о завершении
     msg = await context.bot.send_message(
         chat_id=query.message.chat_id,
         text="Таблица успешно экспортирована!",
@@ -1340,7 +1354,6 @@ async def download_table_driver(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
 
-    # Удаляем старое меню
     await query.delete_message()
     await delete_excel_message(context, query.message.chat_id)
 
@@ -1348,27 +1361,21 @@ async def download_table_driver(update: Update, context: ContextTypes.DEFAULT_TY
     if 'delivery_messages' in context.user_data:
         for msg_id in context.user_data['delivery_messages']:
             try:
-                await context.bot.delete_message(
-                    chat_id=query.message.chat_id,
-                    message_id=msg_id
-                )
+                await context.bot.delete_message(chat_id=query.message.chat_id, message_id=msg_id)
             except:
                 pass
         context.user_data.pop('delivery_messages', None)
 
     driver_id = update.effective_user.id
 
-    # Получаем доставки, назначенные текущему водителю (статус != 'черновик')
     cursor = conn.execute(
         """SELECT id, supplier, payer, invoice_number, pickup_address,
                    delivery_address, cargo_info, author_name, driver_name, status, completed_at
            FROM deliveries
-           WHERE driver_id = ? AND status != 'черновик'
-           ORDER BY completed_at DESC"""
-        , (driver_id,)
+           WHERE driver_id = ?""",
+        (driver_id,)
     )
     deliveries = cursor.fetchall()
-
 
     if not deliveries:
         msg = await context.bot.send_message(
@@ -1379,56 +1386,97 @@ async def download_table_driver(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data['delivery_messages'] = [msg.message_id]
         return
 
-    # Создаём Excel-файл
     wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Мои доставки"
+    sheets_config = {
+        "Текущие": lambda d: d[9] in ["принята в работу"],
+        "Выполненные": lambda d: d[9] == "доставлено",
+        "Черновики": lambda d: d[9] == "черновик",
+        "Приняты в работу": lambda d: d[9] == "принята в работу",
+        "Доставлено": lambda d: d[9] == "доставлено"
+    }
 
-    # Заголовки таблицы
-    headers = [
-        "ID", "Поставщик", "Плательщик", "Счёт", "Адрес загрузки",
-        "Адрес отгрузки", "Габариты/вес", "Автор", "Водитель", "Статус", "Дата выполнения"
-    ]
-    ws.append(headers)
+    for sheet_name, filter_func in sheets_config.items():
+        ws = wb.create_sheet(title=sheet_name)
+        headers = [
+            "ID", "Поставщик", "Плательщик", "Счёт", "Адрес загрузки",
+            "Адрес отгрузки", "Габариты/вес", "Автор", "Водитель",
+            "Статус", "Дата выполнения"
+        ]
+        ws.append(headers)
 
-    # Заполняем данными
-    for delivery in deliveries:
-        ws.append([
-            delivery[0],  # ID
-            delivery[1],  # Поставщик
-            delivery[2],  # Плательщик
-            delivery[3],  # Счёт
-            delivery[4] or "",  # Адрес загрузки
-            delivery[5] or "",  # Адрес отгрузки
-            delivery[6] or "",  # Габариты/вес
-            delivery[7],  # Автор
-            delivery[8],  # Водитель
-            delivery[9],  # Статус
-            delivery[10] or ""  # Дата выполнения
-        ])
-
-    # Включаем автофильтры
-    ws.auto_filter.ref = f"A1:K{ws.max_row}"
-
-    # Стилизуем шапку
-    header_row = ws[1]
-    for cell in header_row:
-        cell.font = openpyxl.styles.Font(bold=True)
-        cell.fill = openpyxl.styles.PatternFill(
-            start_color="D9D9D9",
-            end_color="D9D9D9",
-            fill_type="solid"
-        )
-        cell.alignment = openpyxl.styles.Alignment(
-            horizontal="center",
-            vertical="center"
-        )
-        column_letter = cell.column_letter
-        column_width = max(len(str(cell.value)) + 2, 12)
-        ws.column_dimensions[column_letter].width = column_width
+        filtered_deliveries = [d for d in deliveries if filter_func(d)]
 
 
-    # Сохраняем файл во временный буфер
+        for delivery in filtered_deliveries:
+            row = [
+                delivery[0],  # ID
+                delivery[1],  # Поставщик
+                delivery[2],  # Плательщик
+                delivery[3],  # Счёт
+                delivery[4] or "",  # Адрес загрузки
+                delivery[5] or "",  # Адрес отгрузки
+                delivery[6] or "",  # Габариты/вес
+                delivery[7],  # Автор
+                delivery[8] or "",  # Водитель
+                delivery[9],  # Статус
+                delivery[10] or ""  # Дата выполнения
+            ]
+            ws.append(row)
+
+        # Автофильтры
+        ws.auto_filter.ref = f"A1:K{ws.max_row}"
+
+
+        # Стилизация шапки
+        header_row = ws[1]
+        for cell in header_row:
+            cell.font = openpyxl.styles.Font(bold=True)
+            cell.fill = openpyxl.styles.PatternFill(
+                start_color="D9D9D9",
+                end_color="D9D9D9",
+                fill_type="solid"
+            )
+            cell.alignment = openpyxl.styles.Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True  # Обязательно включаем перенос
+            )
+
+        # Расчёт оптимальной ширины столбцов (максимум 35)
+        column_widths = {}
+        for row in ws.iter_rows(min_row=1, max_row=ws.max_row):
+            for cell in row:
+                if cell.value:
+                    # Разбиваем текст на строки по переносам и ищем максимальную длину
+                    lines = str(cell.value).split('\n')
+                    max_line_length = max(len(line) for line in lines)
+                    column_letter = cell.column_letter
+                    current_width = column_widths.get(column_letter, 0)
+                    # Ограничиваем ширину 35 символами, добавляем 2 на отступы
+                    new_width = min(max_line_length + 2, 35)
+                    column_widths[column_letter] = max(current_width, new_width)
+
+
+        # Применяем рассчитанную ширину
+        for col, width in column_widths.items():
+            ws.column_dimensions[col].width = width
+
+        # Гарантированное центрирование и перенос для всех ячеек
+        for row in ws.iter_rows():
+            for cell in row:
+                # Сохраняем горизонтальное выравнивание из шапки или по умолчанию
+                horizontal_align = cell.alignment.horizontal or "left"
+                cell.alignment = openpyxl.styles.Alignment(
+                    horizontal=horizontal_align,
+                    vertical="center",  # Центрируем по вертикали
+                    wrap_text=True  # Принудительно включаем перенос текста
+                )
+
+    # Удаление пустого листа
+    if wb['Sheet'].max_row == 1 and wb['Sheet'].max_column == 1:
+        wb.remove(wb['Sheet'])
+
+    # Сохраняем в буфер
     from io import BytesIO
     output = BytesIO()
     wb.save(output)
@@ -1438,14 +1486,11 @@ async def download_table_driver(update: Update, context: ContextTypes.DEFAULT_TY
     sent_message = await context.bot.send_document(
         chat_id=query.message.chat_id,
         document=output,
-        filename="мои_доставки.xlsx",
-        caption="Ваши доставки"
+        filename="доставки_водитель.xlsx",
+        caption="Таблица доставок (по статусам)"
     )
-
     context.user_data['excel_message_id'] = sent_message.message_id
 
-
-    # Сообщение о завершении
     msg = await context.bot.send_message(
         chat_id=query.message.chat_id,
         text="Таблица успешно экспортирована!",
